@@ -2,14 +2,15 @@ use bevy_window::WindowResolution;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct WindowUpdated {
-    pub width: u32,
-    pub height: u32,
+pub enum WindowUpdated {
+    Moved { x: i32, y: i32 },
+    Resized { width: u32, height: u32 },
+    Closed,
 }
 
 impl From<WindowResolution> for WindowUpdated {
     fn from(value: WindowResolution) -> Self {
-        Self {
+        Self::Resized {
             width: value.width() as u32,
             height: value.height() as u32,
         }

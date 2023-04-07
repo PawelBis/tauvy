@@ -1,8 +1,7 @@
-use bevy::{prelude::*, window::WindowResized};
+use bevy::prelude::*;
 use events::WindowUpdated;
 use std::net::{TcpListener, TcpStream};
-use tungstenite::handshake::server::{Request, Response};
-use tungstenite::Error;
+use std::sync::{Arc, Mutex, RwLock};
 use tungstenite::WebSocket;
 
 fn main() {
@@ -12,14 +11,13 @@ fn main() {
 
     App::new()
         .insert_resource(Resolution::default())
-        .insert_resource(EventStream(websocket))
+        .insert_resource(EventStream::new(websocket))
         //.insert_resource(server)
         .add_plugins(DefaultPlugins)
         //.add_systems(Startup, (setup_camera, setup_ui))
         .add_startup_systems((setup_camera, setup_ui))
         //.add_systems(Update, (on_resize_system, toggle_resolution))
-        .add_systems((on_resize_system, update_resolution))
-        .add_system(read_stream)
+        .add_system(handle_window_events)
         .run();
 }
 
@@ -30,7 +28,52 @@ struct Resolution(Vec2);
 struct ResolutionText;
 
 #[derive(Resource)]
-struct EventStream(WebSocket<TcpStream>);
+struct EventStream {
+    websocket: Arc<Mutex<WebSocket<TcpStream>>>,
+    pub events: Arc<RwLock<Vec<WindowUpdated>>>,
+}
+
+impl EventStream {
+    fn new(websocket: WebSocket<TcpStream>) -> Self {
+        let mut res = Self {
+            websocket: Arc::new(Mutex::new(websocket)),
+            events: Arc::default(),
+        };
+
+        res.read_stream();
+        res
+    }
+
+    fn read_stream(&mut self) {
+        let socket = Arc::clone(&self.websocket);
+        let events = Arc::clone(&self.events);
+        std::thread::spawn(move || loop {
+            match socket.lock().unwrap().read_message() {
+                Ok(m) => match m {
+                    tungstenite::Message::Binary(b) => {
+                        let m: WindowUpdated = bincode::deserialize(&b).unwrap();
+                        let mut events = events.write().unwrap();
+                        events.push(m);
+                    }
+                    something_else => {
+                        println!("read nothing?: {something_else:?}");
+                    }
+                },
+                Err(_) => {
+                    break;
+                }
+            };
+        });
+    }
+
+    fn get_window_events(&mut self) -> Vec<WindowUpdated> {
+        let mut events = self.events.write().unwrap();
+        let mut out: Vec<WindowUpdated> = Vec::new();
+        std::mem::swap(&mut *events, &mut out);
+
+        return out;
+    }
+}
 
 fn setup_camera(mut cmd: Commands) {
     cmd.spawn(Camera2dBundle::default());
@@ -60,42 +103,21 @@ fn setup_ui(mut cmd: Commands, _asset_server: Res<AssetServer>) {
     });
 }
 
-fn update_resolution(mut windows: Query<&mut Window>, resolution: Res<Resolution>) {
-    let mut _window = windows.single_mut();
-    // window.resolution.set(resolution.0.x, resolution.0.y);
-}
-
-fn on_resize_system(
-    mut q: Query<&mut Text, With<ResolutionText>>,
-    mut resize_reader: EventReader<WindowResized>,
-) {
-    let mut text = q.single_mut();
-    for e in resize_reader.iter() {
-        text.sections[0].value = format!("{:.1} x {:.1}", e.width, e.height);
-    }
-}
-
-fn read_stream(
-    mut socket: ResMut<EventStream>,
+fn handle_window_events(
+    mut event_stream: ResMut<EventStream>,
     mut app_exit_events: ResMut<Events<bevy::app::AppExit>>,
+    mut windows: Query<&mut Window>,
 ) {
-    // Just consume all events for now
-    loop {
-        match socket.0.read_message() {
-            Ok(m) => match m {
-                tungstenite::Message::Binary(b) => {
-                    let m: WindowUpdated = bincode::deserialize(&b).unwrap();
-                    println!("{m:?}")
-                }
-                _ => {},
-            },
-            Err(e) => {
-                println!("{e:?}");
-                if let Error::ConnectionClosed | Error::AlreadyClosed = e {
-                    app_exit_events.send(bevy::app::AppExit);
-                }
-                break;
+    let mut window = windows.single_mut();
+    for e in event_stream.get_window_events() {
+        match e {
+            WindowUpdated::Moved { x, y } => {
+                window.position.set(IVec2{ x, y });
             }
-        };
+            WindowUpdated::Resized { width, height, } => { 
+                window.resolution.set(width as f32, height as f32);
+            },
+            WindowUpdated::Closed => { app_exit_events.send(bevy::app::AppExit); },
+        }
     }
 }
